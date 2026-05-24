@@ -1,0 +1,142 @@
+const fs = require('fs');
+
+const CASA = 'ALEMA';
+const BASE = 'https://sapl.al.ma.leg.br/sapl/consultas/materia/materia_mostrar_proc?cod_materia=';
+const ARQUIVO_ESTADO = 'estado.json';
+const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
+const START_FALLBACK = Number(process.env.START_FALLBACK || 62000);
+const CONCORRENCIA = Number(process.env.CONCORRENCIA || 8);
+
+function carregarEstado() {
+  if (fs.existsSync(ARQUIVO_ESTADO)) return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
+  return { ultimo_id_visto: 0, proposicoes_vistas: [], ultima_execucao: '' };
+}
+
+function salvarEstado(estado) {
+  fs.writeFileSync(ARQUIVO_ESTADO, JSON.stringify(estado, null, 2));
+}
+
+function decode(texto) {
+  return String(texto || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&uacute;/g, 'ú')
+    .replace(/&ccedil;/g, 'ç')
+    .replace(/&atilde;/g, 'ã')
+    .replace(/&otilde;/g, 'õ')
+    .replace(/&aacute;/g, 'á')
+    .replace(/&eacute;/g, 'é')
+    .replace(/&iacute;/g, 'í')
+    .replace(/&oacute;/g, 'ó')
+    .replace(/&Aacute;/g, 'Á')
+    .replace(/&Eacute;/g, 'É')
+    .replace(/&Ccedil;/g, 'Ç')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function limparHtml(texto) {
+  return decode(String(texto || '').replace(/<[^>]+>/g, ' '));
+}
+
+function escapeHtml(texto) {
+  return String(texto ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function buscarMateria(id) {
+  const url = BASE + id;
+  let res;
+  try {
+    res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', 'Accept': 'text/html' }, signal: AbortSignal.timeout(8000) });
+  } catch (err) {
+    console.log(`Erro de rede no ID ${id}: ${err.message}`);
+    return null;
+  }
+  if (!res.ok) return false;
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const html = buffer.toString('latin1');
+  if (!html.includes('Identifica') || !html.includes('Ementa')) return false;
+  const texto = limparHtml(html);
+  const tipo = (texto.match(/Tipo:\s*(.*?)\s+Número:/i) || [])[1] || 'OUTROS';
+  const numeroAno = (texto.match(/Número:\s*([^\s]+)\s+Data:/i) || [])[1] || '-/-';
+  const data = (texto.match(/Data:\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || '-';
+  const ementa = (texto.match(/Ementa:\s*(.*?)(?:Texto Original|Autor|Tramitação|$)/i) || [])[1] || '-';
+  const [numero, ano] = numeroAno.split('/');
+  return {
+    id: String(id),
+    tipo: decode(tipo),
+    numero: numero || '-',
+    ano: ano || '-',
+    data,
+    autor: '-',
+    ementa: decode(ementa).slice(0, 500),
+    link: url,
+  };
+}
+
+async function buscarProposicoes(estado) {
+  const inicio = Math.max(Number(estado.ultimo_id_visto || 0) + 1, START_FALLBACK);
+  const fim = inicio + JANELA_SCAN;
+  const novas = [];
+  let maiorExistente = Number(estado.ultimo_id_visto || 0);
+  let vaziosConsecutivos = 0;
+  for (let base = inicio; base <= fim; base += CONCORRENCIA) {
+    const ids = Array.from({ length: Math.min(CONCORRENCIA, fim - base + 1) }, (_, i) => base + i);
+    const resultados = await Promise.all(ids.map(id => buscarMateria(id).then(item => ({ id, item }))));
+    for (const { id, item } of resultados) {
+      if (item) {
+        maiorExistente = Math.max(maiorExistente, id);
+        vaziosConsecutivos = 0;
+        novas.push(item);
+        console.log(`OK ${id}: ${item.tipo} ${item.numero}/${item.ano}`);
+      } else if (item === false) {
+        vaziosConsecutivos++;
+      }
+    }
+    if (vaziosConsecutivos >= 30 && novas.length > 0) break;
+  }
+  return { proposicoes: novas, maiorExistente };
+}
+
+async function enviarEmail(novas) {
+  if (process.env.DRY_RUN_EMAIL === '1') {
+    console.log(`[DRY_RUN_EMAIL] ${novas.length} proposições novas.`);
+    novas.slice(0, 10).forEach(p => console.log(`${p.id} ${p.tipo} ${p.numero}/${p.ano} - ${p.data}`));
+    return;
+  }
+  const nodemailer = require('nodemailer');
+  const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_REMETENTE, pass: process.env.EMAIL_SENHA } });
+  const linhas = novas.map(p => `<tr><td style="padding:8px;border-bottom:1px solid #eee"><a href="${escapeHtml(p.link)}"><strong>${escapeHtml(p.tipo)} ${escapeHtml(p.numero)}/${escapeHtml(p.ano)}</strong></a></td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.data)}</td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.ementa)}</td></tr>`).join('');
+  await transporter.sendMail({
+    from: `"Monitor ${CASA}" <${process.env.EMAIL_REMETENTE}>`,
+    to: process.env.EMAIL_DESTINO,
+    subject: `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões) — ${new Date().toLocaleDateString('pt-BR')}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2><table style="border-collapse:collapse;width:100%">${linhas}</table></div>`,
+  });
+}
+
+(async () => {
+  console.log('Iniciando Monitor Proposições MA...');
+  const estado = carregarEstado();
+  const ids = new Set((estado.proposicoes_vistas || []).map(String));
+  const { proposicoes, maiorExistente } = await buscarProposicoes(estado);
+  const novas = proposicoes.filter(p => !ids.has(p.id));
+  console.log(`Encontradas: ${proposicoes.length} | Novas: ${novas.length} | maior ID: ${maiorExistente}`);
+  if (process.env.SEED_ONLY === '1') {
+    proposicoes.forEach(p => ids.add(p.id));
+    estado.proposicoes_vistas = Array.from(ids);
+    estado.ultimo_id_visto = Math.max(Number(estado.ultimo_id_visto || 0), maiorExistente);
+    estado.ultima_execucao = new Date().toISOString();
+    salvarEstado(estado);
+    console.log('SEED_ONLY=1 — estado semeado sem envio.');
+    return;
+  }
+  if (novas.length) {
+    await enviarEmail(novas);
+    novas.forEach(p => ids.add(p.id));
+    estado.proposicoes_vistas = Array.from(ids);
+  }
+  estado.ultimo_id_visto = Math.max(Number(estado.ultimo_id_visto || 0), maiorExistente);
+  estado.ultima_execucao = new Date().toISOString();
+  salvarEstado(estado);
+})();
