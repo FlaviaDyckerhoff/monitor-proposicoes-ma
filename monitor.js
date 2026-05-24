@@ -9,7 +9,7 @@ const CONCORRENCIA = Number(process.env.CONCORRENCIA || 8);
 
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
-  return { ultimo_id_visto: 0, proposicoes_vistas: [], ultima_execucao: '' };
+  return { ultimo_id_visto: 0, proposicoes_vistas: [], ultimos_por_tipo_ano: {}, ultima_execucao: '' };
 }
 
 function salvarEstado(estado) {
@@ -41,6 +41,59 @@ function limparHtml(texto) {
 
 function escapeHtml(texto) {
   return String(texto ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function numeroInteiro(p) {
+  const n = Number(String(p.numero || '').replace(/\D/g, ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function chaveTipoAno(p) {
+  return `${p.tipo || 'OUTROS'}|${p.ano || '-'}`;
+}
+
+function calcularUltimosPorTipoAno(proposicoes) {
+  const ultimos = {};
+  for (const p of proposicoes) {
+    const numero = numeroInteiro(p);
+    if (!numero || !p.ano || p.ano === '-') continue;
+    const chave = chaveTipoAno(p);
+    ultimos[chave] = Math.max(ultimos[chave] || 0, numero);
+  }
+  return ultimos;
+}
+
+function detectarSaltos(proposicoes, estado) {
+  const anteriores = estado.ultimos_por_tipo_ano || {};
+  const atuais = calcularUltimosPorTipoAno(proposicoes);
+  const presentes = {};
+  for (const p of proposicoes) {
+    const numero = numeroInteiro(p);
+    if (!numero) continue;
+    const chave = chaveTipoAno(p);
+    if (!presentes[chave]) presentes[chave] = new Set();
+    presentes[chave].add(numero);
+  }
+  const alertas = [];
+  for (const [chave, atual] of Object.entries(atuais)) {
+    const anterior = Number(anteriores[chave] || 0);
+    if (!anterior || atual <= anterior + 1) continue;
+    const faltantes = [];
+    for (let n = anterior + 1; n < atual; n++) {
+      if (!presentes[chave]?.has(n)) faltantes.push(n);
+    }
+    if (faltantes.length) {
+      const [tipo, ano] = chave.split('|');
+      alertas.push({ tipo, ano, anterior, atual, faltantes });
+    }
+  }
+  return { alertas, atuais };
+}
+
+function renderAlertasSaltos(alertas) {
+  if (!alertas.length) return '';
+  const itens = alertas.map(a => `<li><strong>${escapeHtml(a.tipo)} ${escapeHtml(a.ano)}</strong>: último visto ${a.anterior}, maior atual ${a.atual}. Possível(is) ausente(s): ${escapeHtml(a.faltantes.join(', '))}</li>`).join('');
+  return `<div style="background:#fff4e5;border:1px solid #f59e0b;color:#7c2d12;padding:12px 14px;margin:12px 0;border-radius:4px"><strong>Alerta de sequência:</strong><ul style="margin:8px 0 0 18px;padding:0">${itens}</ul></div>`;
 }
 
 async function buscarMateria(id) {
@@ -98,10 +151,11 @@ async function buscarProposicoes(estado) {
   return { proposicoes: novas, maiorExistente };
 }
 
-async function enviarEmail(novas) {
+async function enviarEmail(novas, alertas = []) {
   if (process.env.DRY_RUN_EMAIL === '1') {
     console.log(`[DRY_RUN_EMAIL] ${novas.length} proposições novas.`);
     novas.slice(0, 10).forEach(p => console.log(`${p.id} ${p.tipo} ${p.numero}/${p.ano} - ${p.data}`));
+    alertas.forEach(a => console.log(`[ALERTA_SEQUENCIA] ${a.tipo}/${a.ano}: ${a.anterior} -> ${a.atual}; faltantes: ${a.faltantes.join(', ')}`));
     return;
   }
   const nodemailer = require('nodemailer');
@@ -110,8 +164,8 @@ async function enviarEmail(novas) {
   await transporter.sendMail({
     from: `"Monitor ${CASA}" <${process.env.EMAIL_REMETENTE}>`,
     to: process.env.EMAIL_DESTINO,
-    subject: `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões) — ${new Date().toLocaleDateString('pt-BR')}`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2><table style="border-collapse:collapse;width:100%">${linhas}</table></div>`,
+    subject: `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões)${alertas.length ? ' | alerta sequência' : ''} — ${new Date().toLocaleDateString('pt-BR')}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2>${renderAlertasSaltos(alertas)}<table style="border-collapse:collapse;width:100%">${linhas}</table></div>`,
   });
 }
 
@@ -121,22 +175,30 @@ async function enviarEmail(novas) {
   const ids = new Set((estado.proposicoes_vistas || []).map(String));
   const { proposicoes, maiorExistente } = await buscarProposicoes(estado);
   const novas = proposicoes.filter(p => !ids.has(p.id));
+  const { alertas, atuais } = detectarSaltos(proposicoes, estado);
   console.log(`Encontradas: ${proposicoes.length} | Novas: ${novas.length} | maior ID: ${maiorExistente}`);
+  if (process.env.DRY_RUN_EMAIL === '1') {
+    await enviarEmail(novas, alertas);
+    console.log('DRY_RUN_EMAIL=1 — estado preservado sem alterações.');
+    return;
+  }
   if (process.env.SEED_ONLY === '1') {
     proposicoes.forEach(p => ids.add(p.id));
     estado.proposicoes_vistas = Array.from(ids);
     estado.ultimo_id_visto = Math.max(Number(estado.ultimo_id_visto || 0), maiorExistente);
+    estado.ultimos_por_tipo_ano = { ...(estado.ultimos_por_tipo_ano || {}), ...atuais };
     estado.ultima_execucao = new Date().toISOString();
     salvarEstado(estado);
     console.log('SEED_ONLY=1 — estado semeado sem envio.');
     return;
   }
-  if (novas.length) {
-    await enviarEmail(novas);
+  if (novas.length || alertas.length) {
+    await enviarEmail(novas, alertas);
     novas.forEach(p => ids.add(p.id));
     estado.proposicoes_vistas = Array.from(ids);
   }
   estado.ultimo_id_visto = Math.max(Number(estado.ultimo_id_visto || 0), maiorExistente);
+  estado.ultimos_por_tipo_ano = { ...(estado.ultimos_por_tipo_ano || {}), ...atuais };
   estado.ultima_execucao = new Date().toISOString();
   salvarEstado(estado);
 })();
