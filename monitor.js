@@ -1,4 +1,7 @@
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
 
 const CASA = 'ALEMA';
 const BASE = 'https://sapl.al.ma.leg.br/sapl/consultas/materia/materia_mostrar_proc?cod_materia=';
@@ -6,6 +9,7 @@ const ARQUIVO_ESTADO = 'estado.json';
 const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
 const START_FALLBACK = Number(process.env.START_FALLBACK || 62000);
 const CONCORRENCIA = Number(process.env.CONCORRENCIA || 8);
+const MAX_NETWORK_ERRORS_ZERO_RESULT = Number(process.env.MAX_NETWORK_ERRORS_ZERO_RESULT || 20);
 
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
@@ -103,7 +107,7 @@ async function buscarMateria(id) {
     res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', 'Accept': 'text/html' }, signal: AbortSignal.timeout(8000) });
   } catch (err) {
     console.log(`Erro de rede no ID ${id}: ${err.message}`);
-    return null;
+    return { erroRede: true, id, message: err.message };
   }
   if (!res.ok) return false;
   const buffer = Buffer.from(await res.arrayBuffer());
@@ -131,13 +135,16 @@ async function buscarProposicoes(estado) {
   const inicio = Math.max(Number(estado.ultimo_id_visto || 0) + 1, START_FALLBACK);
   const fim = inicio + JANELA_SCAN;
   const novas = [];
+  let errosRede = 0;
   let maiorExistente = Number(estado.ultimo_id_visto || 0);
   let vaziosConsecutivos = 0;
   for (let base = inicio; base <= fim; base += CONCORRENCIA) {
     const ids = Array.from({ length: Math.min(CONCORRENCIA, fim - base + 1) }, (_, i) => base + i);
     const resultados = await Promise.all(ids.map(id => buscarMateria(id).then(item => ({ id, item }))));
     for (const { id, item } of resultados) {
-      if (item) {
+      if (item && item.erroRede) {
+        errosRede++;
+      } else if (item) {
         maiorExistente = Math.max(maiorExistente, id);
         vaziosConsecutivos = 0;
         novas.push(item);
@@ -148,7 +155,7 @@ async function buscarProposicoes(estado) {
     }
     if (vaziosConsecutivos >= 30 && novas.length > 0) break;
   }
-  return { proposicoes: novas, maiorExistente };
+  return { proposicoes: novas, maiorExistente, errosRede };
 }
 
 async function enviarEmail(novas, alertas = []) {
@@ -158,25 +165,55 @@ async function enviarEmail(novas, alertas = []) {
     alertas.forEach(a => console.log(`[ALERTA_SEQUENCIA] ${a.tipo}/${a.ano}: ${a.anterior} -> ${a.atual}; faltantes: ${a.faltantes.join(', ')}`));
     return;
   }
+  const linhas = novas.map(p => `<tr><td style="padding:8px;border-bottom:1px solid #eee"><a href="${escapeHtml(p.link)}"><strong>${escapeHtml(p.tipo)} ${escapeHtml(p.numero)}/${escapeHtml(p.ano)}</strong></a></td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.data)}</td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.ementa)}</td></tr>`).join('');
+  const subject = `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões)${alertas.length ? ' | alerta sequência' : ''} — ${new Date().toLocaleDateString('pt-BR')}`;
+  const html = `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2>${renderAlertasSaltos(alertas)}<table style="border-collapse:collapse;width:100%">${linhas}</table></div>`;
+
+  if (process.env.USE_GMAIL_API === '1') {
+    const tmp = path.join(os.tmpdir(), 'alema-email-' + Date.now() + '.html');
+    fs.writeFileSync(tmp, html);
+    const script = [
+      'import sys',
+      "sys.path.insert(0, '/root/.openclaw/workspace/agents/shared')",
+      'from notificacoes import enviar_email',
+      'subject = sys.argv[1]',
+      'html_path = sys.argv[2]',
+      'destinos = [d.strip() for d in sys.argv[3].split(\",\") if d.strip()]',
+      "body = open(html_path, encoding='utf-8').read()",
+      'ok = enviar_email(subject, body, destinatarios=destinos)',
+      'raise SystemExit(0 if ok else 1)',
+    ].join('\n');
+    const result = spawnSync('python3', ['-c', script, subject, tmp, process.env.EMAIL_DESTINO || 'tramitacao@monitorlegislativo.com.br'], { encoding: 'utf8' });
+    fs.rmSync(tmp, { force: true });
+    if (result.status !== 0) {
+      throw new Error('Falha no envio via Gmail API: ' + (result.stderr || result.stdout || 'sem detalhe'));
+    }
+    console.log(`Email enviado via Gmail API com ${novas.length} proposição(ões) nova(s). destino=${process.env.EMAIL_DESTINO || 'tramitacao@monitorlegislativo.com.br'}`);
+    return;
+  }
+
   const nodemailer = require('nodemailer');
   const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_REMETENTE, pass: process.env.EMAIL_SENHA } });
-  const linhas = novas.map(p => `<tr><td style="padding:8px;border-bottom:1px solid #eee"><a href="${escapeHtml(p.link)}"><strong>${escapeHtml(p.tipo)} ${escapeHtml(p.numero)}/${escapeHtml(p.ano)}</strong></a></td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.data)}</td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.ementa)}</td></tr>`).join('');
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from: `"Monitor ${CASA}" <${process.env.EMAIL_REMETENTE}>`,
     to: process.env.EMAIL_DESTINO,
-    subject: `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões)${alertas.length ? ' | alerta sequência' : ''} — ${new Date().toLocaleDateString('pt-BR')}`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2>${renderAlertasSaltos(alertas)}<table style="border-collapse:collapse;width:100%">${linhas}</table></div>`,
+    subject,
+    html,
   });
+  console.log(`Email enviado com ${novas.length} proposição(ões) nova(s). messageId=${info.messageId || '-'} destino=${process.env.EMAIL_DESTINO || '-'}`);
 }
 
 (async () => {
   console.log('Iniciando Monitor Proposições MA...');
   const estado = carregarEstado();
   const ids = new Set((estado.proposicoes_vistas || []).map(String));
-  const { proposicoes, maiorExistente } = await buscarProposicoes(estado);
+  const { proposicoes, maiorExistente, errosRede } = await buscarProposicoes(estado);
   const novas = proposicoes.filter(p => !ids.has(p.id));
   const { alertas, atuais } = detectarSaltos(proposicoes, estado);
-  console.log(`Encontradas: ${proposicoes.length} | Novas: ${novas.length} | maior ID: ${maiorExistente}`);
+  console.log(`Encontradas: ${proposicoes.length} | Novas: ${novas.length} | maior ID: ${maiorExistente} | erros de rede: ${errosRede}`);
+  if (proposicoes.length === 0 && errosRede >= MAX_NETWORK_ERRORS_ZERO_RESULT) {
+    throw new Error(`Coleta inválida: ${errosRede} erros de rede e 0 proposições encontradas. Run não pode ficar verde.`);
+  }
   if (process.env.DRY_RUN_EMAIL === '1') {
     await enviarEmail(novas, alertas);
     console.log('DRY_RUN_EMAIL=1 — estado preservado sem alterações.');

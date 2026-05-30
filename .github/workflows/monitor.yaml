@@ -1,9 +1,6 @@
 name: Monitor Proposições MA
 
 on:
-  schedule:
-    - cron: '0 11 * * 1-5'
-    - cron: '0 19 * * 1-5'
   workflow_dispatch:
 
 permissions:
