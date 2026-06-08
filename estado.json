@@ -1,5 +1,5 @@
 {
-  "ultimo_id_visto": 62123,
+  "ultimo_id_visto": 62125,
   "proposicoes_vistas": [
     "61900",
     "61902",
@@ -199,12 +199,14 @@
     "62120",
     "62121",
     "62122",
-    "62123"
+    "62123",
+    "62124",
+    "62125"
   ],
-  "ultima_execucao": "2026-06-08T11:00:07.646Z",
+  "ultima_execucao": "2026-06-08T19:00:09.265Z",
   "ultimos_por_tipo_ano": {
     "REQ - Requerimento|2026": 198,
-    "PLO - Projeto de Lei Ordinária|2026": 186,
+    "PLO - Projeto de Lei Ordinária|2026": 188,
     "MSG - Mensagem|2026": 39,
     "MOC - Moção|2026": 10,
     "IND - Indicação|2026": 418,
