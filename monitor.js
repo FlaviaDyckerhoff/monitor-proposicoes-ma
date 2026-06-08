@@ -126,7 +126,7 @@ async function buscarMateria(id) {
     ano: ano || '-',
     data,
     autor: '-',
-    ementa: decode(ementa).slice(0, 500),
+    ementa: decode(ementa).replace(/\s+/g, ' ').trim() || '-',
     link: url,
   };
 }
