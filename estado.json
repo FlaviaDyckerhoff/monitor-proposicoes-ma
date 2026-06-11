@@ -1,5 +1,5 @@
 {
-  "ultimo_id_visto": 62159,
+  "ultimo_id_visto": 62169,
   "proposicoes_vistas": [
     "61900",
     "61902",
@@ -231,15 +231,24 @@
     "62155",
     "62156",
     "62158",
-    "62159"
+    "62159",
+    "62160",
+    "62161",
+    "62162",
+    "62163",
+    "62164",
+    "62165",
+    "62166",
+    "62168",
+    "62169"
   ],
-  "ultima_execucao": "2026-06-11T11:00:07.650Z",
+  "ultima_execucao": "2026-06-11T19:00:08.557Z",
   "ultimos_por_tipo_ano": {
-    "REQ - Requerimento|2026": 203,
-    "PLO - Projeto de Lei Ordinária|2026": 194,
+    "REQ - Requerimento|2026": 207,
+    "PLO - Projeto de Lei Ordinária|2026": 198,
     "MSG - Mensagem|2026": 43,
     "MOC - Moção|2026": 10,
-    "IND - Indicação|2026": 425,
+    "IND - Indicação|2026": 426,
     "PRE - Projeto de Resolução Legislativa|2026": 58,
     "VETT - Veto Total|2026": 379
   }
