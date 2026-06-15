@@ -1,6 +1,8 @@
 name: Monitor Proposições MA
 
 on:
+  schedule:
+    - cron: '12 8 * * 1-5'   # 05:12 BRT
   workflow_dispatch:
 
 permissions:
