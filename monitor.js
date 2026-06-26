@@ -4,6 +4,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const CASA = 'ALEMA';
+const EMAIL_LOCALIDADE = 'Maranhão';
 const BASE = 'https://sapl.al.ma.leg.br/sapl/consultas/materia/materia_mostrar_proc?cod_materia=';
 const ARQUIVO_ESTADO = 'estado.json';
 const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
@@ -301,7 +302,7 @@ async function enviarEmail(novas, alertas = []) {
   }
   const novasOrdenadas = [...novas].sort(compararProposicoesEmail);
   const linhas = novasOrdenadas.map(p => `<tr><td style="padding:8px;border-bottom:1px solid #eee"><a href="${escapeHtml(p.link)}"><strong>${escapeHtml(p.tipo)} ${escapeHtml(p.numero)}/${escapeHtml(p.ano)}</strong></a></td><td style="padding:8px;border-bottom:1px solid #eee">${escapeHtml(p.data)}</td><td style="padding:8px;border-bottom:1px solid #eee">${renderizarEmentaCliente(p)}</td></tr>`).join('');
-  const subject = `🏛️ ${CASA}: ${novas.length} nova(s) proposição(ões)${alertas.length ? ' | alerta sequência' : ''} — ${new Date().toLocaleDateString('pt-BR')}`;
+  const subject = `🏛️ ${EMAIL_LOCALIDADE}: ${novas.length} nova(s) proposição(ões)${alertas.length ? ' | alerta sequência' : ''} — ${new Date().toLocaleDateString('pt-BR')}`;
   const html = `<div style="font-family:Arial,sans-serif;max-width:960px"><h2>${CASA} — ${novas.length} nova(s) proposição(ões)</h2>${renderAlertasSaltos(alertas)}<table style="border-collapse:collapse;width:100%">${linhas}</table></div>`;
 
   if (process.env.USE_GMAIL_API === '1') {
