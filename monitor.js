@@ -17,7 +17,7 @@ const CONTROLE03_BASIC_AUTH = process.env.CONTROLE03_BASIC_AUTH || '';
 const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
 const START_FALLBACK = Number(process.env.START_FALLBACK || 62000);
 const CONCORRENCIA = Number(process.env.CONCORRENCIA || 2);
-const MAX_NETWORK_ERRORS_ZERO_RESULT = Number(process.env.MAX_NETWORK_ERRORS_ZERO_RESULT || 20);
+const MAX_NETWORK_ERRORS_ZERO_RESULT = Number(process.env.MAX_NETWORK_ERRORS_ZERO_RESULT || 10);
 
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
@@ -112,7 +112,7 @@ async function buscarMateria(id) {
   const url = BASE + id;
   let res;
   try {
-    res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', 'Accept': 'text/html' }, signal: AbortSignal.timeout(20000) });
+    res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', 'Accept': 'text/html' }, signal: AbortSignal.timeout(12000) });
   } catch (err) {
     console.log(`Erro de rede no ID ${id}: ${err.message}`);
     return { erroRede: true, id, message: err.message };
@@ -160,6 +160,10 @@ async function buscarProposicoes(estado) {
       } else if (item === false) {
         vaziosConsecutivos++;
       }
+    }
+    if (novas.length === 0 && errosRede >= MAX_NETWORK_ERRORS_ZERO_RESULT) {
+      console.warn(`⚠️ ${errosRede} erros de rede sem nenhuma proposição válida. Abortando varredura para evitar Action presa em fonte indisponível.`);
+      break;
     }
     if (vaziosConsecutivos >= 30 && novas.length > 0) break;
   }
