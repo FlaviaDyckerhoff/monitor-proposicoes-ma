@@ -24,7 +24,7 @@ const CASA_RADAR03 = process.env.CASA_RADAR03 || 'ALEMA';
 const CONTROLE03_STATE_URL = process.env.CONTROLE03_STATE_URL || new URL('api/state', RADAR03_URL).toString();
 const CONTROLE03_API_USER = process.env.CONTROLE03_API_USER || '';
 const CONTROLE03_API_PASS = process.env.CONTROLE03_API_PASS || '';
-const CONTROLE03_BASIC_AUTH = process.env.CONTROLE03_BASIC_AUTH || '';
+const CONTROLE03_BASIC_AUTH = process.env.CONTROLE03_BASIC_AUTH || 'Basic controle03bot';
 
 const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
 const START_FALLBACK = Number(process.env.START_FALLBACK || 62000);
@@ -551,7 +551,7 @@ async function sincronizarRadar03(novas) {
     });
 
     const postResp = await fetch(CONTROLE03_STATE_URL, {
-      method: 'POST', headers: radar03AuthHeaders(), body: JSON.stringify({ data: [casa], merge_casas: [CASA_RADAR03] }),
+      method: 'POST', headers: radar03AuthHeaders(), body: JSON.stringify({ data: [casa], merge_casas: [CASA_RADAR03], expected_updated_at: state.updated_at }),
     });
     if (!postResp.ok) throw new Error('POST ' + postResp.status);
     console.log('✅ Radar 03 sincronizado: ' + CASA_RADAR03 + ' · ' + resumo.map(item => item.tipo + ' ' + item.numero + '/' + item.ano).join(' | '));
