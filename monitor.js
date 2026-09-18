@@ -535,6 +535,7 @@ async function sincronizarRadar03(novas) {
         item.clienteCitadoNomes = det.clienteCitadoNomes || item.clienteCitadoNomes || item.clienteSugestao || '';
         item.radar03Id = det.id || item.radar03Id || '';
         item.listaReal03 = true;
+        item.detalheIndividual03 = true;
       });
     });
 
