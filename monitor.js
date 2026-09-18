@@ -101,6 +101,7 @@ function detectarSaltos(proposicoes, estado) {
   }
   const alertas = [];
   for (const [chave, atual] of Object.entries(atuais)) {
+    if (/^(VETT|VETP)(\s|\||-)/i.test(chave)) continue;
     const anterior = Number(anteriores[chave] || 0);
     if (!anterior || atual <= anterior + 1) continue;
     const faltantes = [];
