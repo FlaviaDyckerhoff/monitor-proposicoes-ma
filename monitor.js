@@ -16,7 +16,8 @@ const { spawnSync } = require('child_process');
 
 const CASA = 'ALEMA';
 const EMAIL_LOCALIDADE = 'Maranhão';
-const BASE = 'https://sapl.al.ma.leg.br/sapl/consultas/materia/materia_mostrar_proc?cod_materia=';
+const API_BASE = 'https://alemalegis.al.ma.leg.br/api/v1/public/legislative-matter';
+const PUBLIC_BASE = 'https://alemalegis.al.ma.leg.br/sapl/protocol/legislative-matter/view/';
 const ARQUIVO_ESTADO = 'estado.json';
 const RADAR03_URL = process.env.RADAR03_URL || 'https://doe.monitorlegislativo.com.br/controle03/';
 const CASA_RADAR03 = process.env.CASA_RADAR03 || 'ALEMA';
@@ -29,6 +30,8 @@ const JANELA_SCAN = Number(process.env.JANELA_SCAN || 100);
 const START_FALLBACK = Number(process.env.START_FALLBACK || 62000);
 const CONCORRENCIA = Number(process.env.CONCORRENCIA || 2);
 const MAX_NETWORK_ERRORS_ZERO_RESULT = Number(process.env.MAX_NETWORK_ERRORS_ZERO_RESULT || 10);
+const DRY_RUN = String(process.env.DRY_RUN || '').trim() === '1';
+const MIGRATION_APPLY = String(process.env.ALEMA_MIGRATION_APPLY || '').trim() === '1';
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
   return { ultimo_id_visto: 0, proposicoes_vistas: [], ultimos_por_tipo_ano: {}, ultima_execucao: '' };
@@ -118,66 +121,64 @@ function renderAlertasSaltos(alertas) {
   return `<div style="background:#fff4e5;border:1px solid #f59e0b;color:#7c2d12;padding:12px 14px;margin:12px 0;border-radius:4px"><strong>Alerta de sequência:</strong><ul style="margin:8px 0 0 18px;padding:0">${itens}</ul></div>`;
 }
 
-async function buscarMateria(id) {
-  const url = BASE + id;
-  let res;
-  try {
-    res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', 'Accept': 'text/html' }, signal: AbortSignal.timeout(12000) });
-  } catch (err) {
-    console.log(`Erro de rede no ID ${id}: ${err.message}`);
-    return { erroRede: true, id, message: err.message };
-  }
-  if (!res.ok) return false;
-  const buffer = Buffer.from(await res.arrayBuffer());
-  const html = buffer.toString('latin1');
-  if (!html.includes('Identifica') || !html.includes('Ementa')) return false;
-  const texto = limparHtml(html);
-  const tipo = (texto.match(/Tipo:\s*(.*?)\s+Número:/i) || [])[1] || 'OUTROS';
-  const numeroAno = (texto.match(/Número:\s*([^\s]+)\s+Data:/i) || [])[1] || '-/-';
-  const data = (texto.match(/Data:\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || '-';
-  const ementa = (texto.match(/Ementa:\s*(.*?)(?:Texto Original|Autor|Tramitação|$)/i) || [])[1] || '-';
-  const [numero, ano] = numeroAno.split('/');
+function dataBr(dataIso) {
+  const match = String(dataIso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : '-';
+}
+
+function materiaDaApi(item) {
+  const sigla = String(item.matterTypeSigla || '').trim();
+  const descricao = String(item.matterTypeDescription || '').trim();
   return {
-    id: String(id),
-    tipo: decode(tipo),
-    numero: numero || '-',
-    ano: ano || '-',
-    data,
-    autor: '-',
-    ementa: decode(ementa).replace(/\s+/g, ' ').trim() || '-',
-    link: url,
+    id: String(item.id),
+    tipo: [sigla, descricao].filter(Boolean).join(' - ') || 'OUTROS',
+    sigla: sigla || 'OUTROS',
+    numero: String(item.number || '-'),
+    ano: String(item.year || '-'),
+    data: dataBr(item.presentationDate),
+    autor: String(item.authorNames || '-').trim() || '-',
+    ementa: String(item.ement || '-').replace(/\s+/g, ' ').trim() || '-',
+    link: PUBLIC_BASE + item.id,
   };
 }
 
-async function buscarProposicoes(estado) {
-  const inicio = Math.max(Number(estado.ultimo_id_visto || 0) + 1, START_FALLBACK);
-  const fim = inicio + JANELA_SCAN;
-  const novas = [];
-  let errosRede = 0;
-  let maiorExistente = Number(estado.ultimo_id_visto || 0);
-  let vaziosConsecutivos = 0;
-  for (let base = inicio; base <= fim; base += CONCORRENCIA) {
-    const ids = Array.from({ length: Math.min(CONCORRENCIA, fim - base + 1) }, (_, i) => base + i);
-    const resultados = await Promise.all(ids.map(id => buscarMateria(id).then(item => ({ id, item }))));
-    for (const { id, item } of resultados) {
-      if (item && item.erroRede) {
-        errosRede++;
-      } else if (item) {
-        maiorExistente = Math.max(maiorExistente, id);
-        vaziosConsecutivos = 0;
-        novas.push(item);
-        console.log(`OK ${id}: ${item.tipo} ${item.numero}/${item.ano}`);
-      } else if (item === false) {
-        vaziosConsecutivos++;
-      }
-    }
-    if (novas.length === 0 && errosRede >= MAX_NETWORK_ERRORS_ZERO_RESULT) {
-      console.warn(`⚠️ ${errosRede} erros de rede sem nenhuma proposição válida. Abortando varredura para evitar Action presa em fonte indisponível.`);
-      break;
-    }
-    if (vaziosConsecutivos >= 30 && novas.length > 0) break;
+function limitesPorSigla(estado) {
+  const limites = {};
+  for (const [chave, numero] of Object.entries(estado.ultimos_por_tipo_ano || {})) {
+    const sigla = String(chave).split(/\s+-\s+|\|/)[0].trim().toUpperCase();
+    if (sigla) limites[sigla] = Math.max(limites[sigla] || 0, Number(numero) || 0);
   }
-  return { proposicoes: novas, maiorExistente, errosRede };
+  return limites;
+}
+
+async function buscarProposicoes(estado) {
+  const ultimoApi = Number(estado.ultimo_id_visto_api || 0);
+  const migrando = ultimoApi === 0;
+  const tamanho = migrando ? 500 : Math.max(100, JANELA_SCAN);
+  const url = `${API_BASE}/filter/access?page=0&size=${tamanho}&sort=id,desc`;
+  let payload;
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120', Accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    payload = await res.json();
+  } catch (err) {
+    console.error(`Erro na API oficial da ALEMA: ${err.message}`);
+    return { proposicoes: [], maiorExistente: ultimoApi, errosRede: 1, migrando };
+  }
+  if (!Array.isArray(payload.content)) throw new Error('Resposta inválida da API oficial da ALEMA');
+
+  const limites = limitesPorSigla(estado);
+  const itens = payload.content.filter(item => {
+    if (!migrando) return Number(item.id) > ultimoApi;
+    const sigla = String(item.matterTypeSigla || '').toUpperCase();
+    const limite = limites[sigla];
+    return limite != null && String(item.year || '') === '2026' && Number(item.number) > limite;
+  });
+  const proposicoes = itens.map(materiaDaApi);
+  const maiorExistente = payload.content.reduce((max, item) => Math.max(max, Number(item.id) || 0), ultimoApi);
+  proposicoes.forEach(item => console.log(`OK ${item.id}: ${item.tipo} ${item.numero}/${item.ano}`));
+  if (migrando) console.log(`Migração SAPL → Alemalegis: ${proposicoes.length} item(ns) acima dos últimos números conhecidos.`);
+  return { proposicoes, maiorExistente, errosRede: 0, migrando };
 }
 
 function prioridadeTipoEmail(tipo) {
@@ -397,10 +398,11 @@ function radar03TipoControle(tipo) {
     'PROJETO DE LEI COMPLEMENTAR': 'PLC', 'PLC': 'PLC', 'PLC - PROJETO DE LEI COMPLEMENTAR': 'PLC', 'PLC PROJETO DE LEI COMPLEMENTAR': 'PLC',
     'PROPOSTA DE EMENDA A CONSTITUICAO': 'PEC', 'PEC': 'PEC', 'PEC - PROPOSTA DE EMENDA CONSTITUCIONAL': 'PEC', 'PEC PROPOSTA DE EMENDA CONSTITUCIONAL': 'PEC',
     'PROJETO DE DECRETO LEGISLATIVO': 'PDL', 'PDL': 'PDL',
-    'PROJETO DE RESOLUCAO': 'PR', 'PR': 'PR',
+    'PROJETO DE RESOLUCAO': 'PR', 'PR': 'PR', 'PRE': 'PR',
     'PROJETO DE INDICACAO': 'PIL', 'PIL': 'PIL', 'PIL - PROJETO DE INDICACAO': 'PIL', 'PIL PROJETO DE INDICACAO': 'PIL',
     'INDICACAO': 'IND', 'MOCAO': 'MOC', 'REQUERIMENTO': 'REQ', 'REQ.': 'REQ',
     'REQUERIMENTO DE INFORMACAO': 'REQINF', 'RI': 'REQINF', 'VETO': 'VETO',
+    'VETT': 'VT', 'VETP': 'VP',
   };
   return mapa[normal] || String(tipo || '').trim().toUpperCase();
 }
@@ -426,7 +428,7 @@ function radar03AuthHeaders() {
 function radar03AgruparNovidades(novas) {
   const porTipo = new Map();
   (novas || []).forEach(p => {
-    const tipo = radar03TipoControle(p?.tipo || p?.sigla || p?.rotulo || '');
+    const tipo = radar03TipoControle(p?.sigla || p?.tipo || p?.rotulo || '');
     const partes = radar03NumeroPartes(p);
     if (!tipo || !partes) return;
     const itemCaptado = {
@@ -534,12 +536,13 @@ async function sincronizarRadar03(novas) {
     });
 
     const postResp = await fetch(CONTROLE03_STATE_URL, {
-      method: 'POST', headers: radar03AuthHeaders(), body: JSON.stringify({ data, merge_casas: [CASA_RADAR03] }),
+      method: 'POST', headers: radar03AuthHeaders(), body: JSON.stringify({ data: [casa], merge_casas: [CASA_RADAR03] }),
     });
     if (!postResp.ok) throw new Error('POST ' + postResp.status);
     console.log('✅ Radar 03 sincronizado: ' + CASA_RADAR03 + ' · ' + resumo.map(item => item.tipo + ' ' + item.numero + '/' + item.ano).join(' | '));
   } catch (err) {
-    console.warn('⚠️ Não foi possível sincronizar o Radar 03 automaticamente: ' + err.message);
+    console.error('❌ Não foi possível sincronizar o Radar 03 automaticamente: ' + err.message);
+    throw err;
   }
 }
 
@@ -649,12 +652,23 @@ async function enviarEmail(novas, alertas = []) {
   console.log('Iniciando Monitor Proposições MA...');
   const estado = carregarEstado();
   const ids = new Set((estado.proposicoes_vistas || []).map(String));
-  const { proposicoes, maiorExistente, errosRede } = await buscarProposicoes(estado);
+  const { proposicoes, maiorExistente, errosRede, migrando } = await buscarProposicoes(estado);
   const novas = proposicoes.filter(p => !ids.has(p.id));
   const { alertas, atuais } = detectarSaltos(proposicoes, estado);
   console.log(`Encontradas: ${proposicoes.length} | Novas: ${novas.length} | maior ID: ${maiorExistente} | erros de rede: ${errosRede}`);
-  if (proposicoes.length === 0 && errosRede >= MAX_NETWORK_ERRORS_ZERO_RESULT) {
+  if (proposicoes.length === 0 && errosRede > 0) {
     console.warn(`⚠️ Fonte indisponível: ${errosRede} erros de rede e 0 proposições encontradas. Encerrando sem alterar estado para evitar alerta vermelho repetido.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (DRY_RUN) {
+    anotarClientesCitados(novas);
+    console.log(`DRY_RUN=1 — ${novas.length} nova(s); sem email, sem Controle 03 e sem alteração de estado.`);
+    novas.forEach(p => console.log(`${p.id} ${p.tipo} ${p.numero}/${p.ano} - ${p.data}${p.clientesCitados?.length ? ' | CLIENTE: ' + p.clientesCitados.join(', ') : ''}`));
+    return;
+  }
+  if (migrando && !MIGRATION_APPLY) {
+    console.warn(`Migração pendente: ${novas.length} item(ns) identificados. Nada será enviado ou gravado sem ALEMA_MIGRATION_APPLY=1.`);
     return;
   }
   if (process.env.DRY_RUN_EMAIL === '1') {
@@ -674,11 +688,13 @@ async function enviarEmail(novas, alertas = []) {
     return;
   }
   if (novas.length || alertas.length) {
+    if (novas.length) await sincronizarRadar03(novas);
     await enviarEmail(novas, alertas);
     novas.forEach(p => ids.add(p.id));
     estado.proposicoes_vistas = Array.from(ids);
   }
   estado.ultimo_id_visto = Math.max(Number(estado.ultimo_id_visto || 0), maiorExistente);
+  estado.ultimo_id_visto_api = Math.max(Number(estado.ultimo_id_visto_api || 0), maiorExistente);
   estado.ultimos_por_tipo_ano = { ...(estado.ultimos_por_tipo_ano || {}), ...atuais };
   estado.ultima_execucao = new Date().toISOString();
   salvarEstado(estado);
